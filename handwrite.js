@@ -148,19 +148,12 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 	}
 
 	var drawingCanvas = {id: "notescanvas" };
-	setupDrawingCanvas(0);
-
-	var mouseX = 0;
-	var mouseY = 0;
-	var xLast = null;
-	var yLast = null;
+	setupDrawingCanvas();
 
 	var slideStart = Date.now();
 	var slideIndices =  { h:0, v:0 };
-    var event = null;
-    var timeouts = [];
 
-	function setupDrawingCanvas( id ) {
+	function setupDrawingCanvas() {
 		var container = document.createElement( 'div' );
 		container.id = drawingCanvas.id;
 		container.classList.add( 'overlay' );
@@ -175,7 +168,6 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		drawingCanvas.xOffset = 0;
 		drawingCanvas.yOffset = 0;
 
-
         container.style.zIndex = "24";
         container.style.visibility = 'visible';
         container.style.pointerEvents = "none";
@@ -183,18 +175,9 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
         var aspectRatio = deck.getConfig().width / deck.getConfig().height;
         if ( drawingCanvas.width > drawingCanvas.height*aspectRatio ) {
             drawingCanvas.xOffset = (drawingCanvas.width - drawingCanvas.height*aspectRatio) / 2;
-        }
-        else if ( drawingCanvas.height > drawingCanvas.width/aspectRatio ) {
+        } else if ( drawingCanvas.height > drawingCanvas.width/aspectRatio ) {
             drawingCanvas.yOffset = ( drawingCanvas.height - drawingCanvas.width/aspectRatio ) / 2;
         }
-
-		var sponge = document.createElement( 'img' );
-		sponge.src = eraser.src;
-		sponge.id = "sponge";
-		sponge.style.visibility = "hidden";
-		sponge.style.position = "absolute";
-		container.appendChild( sponge );
-		drawingCanvas.sponge = sponge;
 
 		var canvas = document.createElement( 'canvas' );
 		canvas.width = drawingCanvas.width;
@@ -306,21 +289,6 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		return data;
 	}
 
-	/**
-	 * Returns maximum duration of slide playback for both modes
-	 */
-	function getSlideDuration( indices ) {
-		if (!indices) indices = slideIndices;
-		var duration = 0;
-        for (var i = 0; i < storage.data.length; i++) {
-            if (storage.data[i].slide.h === indices.h && storage.data[i].slide.v === indices.v && storage.data[i].slide.f === indices.f ) {
-                duration = Math.max( duration, storage.data[i].duration );
-                break;
-            }
-        }
-		return duration;
-	}
-
 /*****************************************************************
 ** Print
 ******************************************************************/
@@ -364,12 +332,15 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 ** Drawings
 ******************************************************************/
 
-    function drawWithPen(context,fromX,fromY,toX,toY){
+    function startPathWithPen(context, x, y) {
         context.lineWidth = penWidth;
         context.lineCap = 'butt';
         context.strokeStyle = pens[color].color;
         context.beginPath();
-        context.moveTo(fromX, fromY);
+        context.moveTo(x, y);
+    }
+
+    function drawPathWithPen(context,toX,toY){
         context.lineTo(toX, toY);
         context.stroke();
     }
@@ -425,21 +396,14 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 //console.log(JSON.stringify(message));
 		if ( message.content && message.content.sender == 'chalkboard-plugin' ) {
 			switch ( message.content.type ) {
-				case 'startDrawing':
-					startDrawing(message.content.x, message.content.y, message.content.erase);
+				case 'startPath':
+					startPath(message.content.x, message.content.y, message.content.erase);
 					break;
-				case 'startErasing':
-					if ( message.content ) {
-						message.content.type = "erase";
-						message.content.begin = Date.now() - slideStart;
-						eraseWithSponge(drawingCanvas.context, message.content.x, message.content.y);
-					}
+				case 'extendPath':
+					extendPath(message.content.x, message.content.y, message.content.erase);
 					break;
-				case 'drawSegment':
-					drawSegment(message.content.x, message.content.y, message.content.erase);
-					break;
-				case 'stopDrawing':
-					stopDrawing();
+				case 'endPath':
+					endPath();
 					break;
 				case 'clear':
                     if ( !readOnly ) {
@@ -447,10 +411,7 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
                         clearCanvas();
                     }
 					break;
-				case 'setcolor':
-					setColor(message.content.index);
-					break;
-				case 'resetSlide':
+				case 'reset':
 					resetSlide(true);
 					break;
 				case 'init':
@@ -459,13 +420,17 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
                     drawingCanvas.xOffset = (drawingCanvas.width - storage.width * drawingCanvas.scale)/2;
                     drawingCanvas.yOffset = (drawingCanvas.height - storage.height * drawingCanvas.scale)/2;
 					clearCanvas();
-						startPlayback( getSlideDuration(), 0 );
+						startPlayback();
 					break;
 				default:
 					break;
 			}
 		}
 	});
+
+
+
+
 
 /*****************************************************************
 ** Playback
@@ -482,31 +447,17 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		slideData.duration = Math.max( slideData.duration, Date.now() - slideStart ) + 1;
 	}
 
-	function startPlayback( timestamp ) {
-		slideStart = Date.now() - timestamp;
+	function startPlayback() {
         clearCanvas();
-        var slideData = getSlideData( slideIndices);
-//console.log( timestamp +" / " + JSON.stringify(slideData));
-        var index = 0;
-        for ( let index = 0; index < slideData.events.length ; index++ ) {
-            playEvent( slideData.events[index] );
+        for (let event of getSlideData( slideIndices).events) {
+            playEvent(event);
         }
-	}
-
-	function stopPlayback() {
-        for (var i = 0; i < timeouts.length; i++) {
-            clearTimeout(timeouts[id][i]);
-        }
-        timeouts = [];
 	}
 
 	function playEvent( event ) {
 		switch ( event.type ) {
 			case "clear":
 				clearCanvas();
-				break;
-			case "setcolor":
-				setColor(event.index);
 				break;
 			case "draw":
 				drawCurve( event );
@@ -525,13 +476,9 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 			var xOffset = drawingCanvas.xOffset;
 			var yOffset = drawingCanvas.yOffset;
 
-			var stepDuration = ( event.end - event.begin )/ ( event.curve.length - 1 );
-//console.log("---");
+            startPathWithPen(ctx, xOffset + event.curve[0].x*scale, yOffset + event.curve[0].y*scale);
 			for (var i = 1; i < event.curve.length; i++) {
-				if (event.begin + i * stepDuration <= (Date.now() - slideStart)) {
-//console.log( "Draw " + timestamp +" / " + event.begin + " + " + i + " * " + stepDuration );
-					drawWithPen(ctx, xOffset + event.curve[i-1].x*scale, yOffset + event.curve[i-1].y*scale, xOffset + event.curve[i].x*scale, yOffset + event.curve[i].y*scale);
-				}
+                drawPathWithPen(ctx, xOffset + event.curve[i].x*scale, yOffset + event.curve[i].y*scale);
 			}
 		}
 
@@ -544,180 +491,147 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 			var xOffset = drawingCanvas.xOffset;
 			var yOffset = drawingCanvas.yOffset;
 
-			var stepDuration = ( event.end - event.begin )/ event.curve.length;
 			for (var i = 0; i < event.curve.length; i++) {
-				if (event.begin + i * stepDuration <= (Date.now() - slideStart)) {
-					eraseWithSponge(ctx, xOffset + event.curve[i].x*scale, yOffset + event.curve[i].y*scale);
-				}
+                eraseWithSponge(ctx, xOffset + event.curve[i].x*scale, yOffset + event.curve[i].y*scale);
 			}
 		}
 
 	}
 
-
-	function startDrawing( x, y, erase ) {
-			var ctx = drawingCanvas.context;
-			var scale = drawingCanvas.scale;
-			var xOffset = drawingCanvas.xOffset;
-			var yOffset = drawingCanvas.yOffset;
-			xLast = x * scale + xOffset;
-			yLast = y * scale + yOffset;
-			if ( erase === true) {
-				event = { type: "erase", begin: Date.now() - slideStart, end: null, curve: [{x: x, y: y}]};
-				drawingCanvas.canvas.style.cursor = 'url("' + eraser.src +  '") ' + eraser.radius + ' ' + eraser.radius + ', auto';
-				eraseWithSponge(ctx, x * scale + xOffset, y * scale + yOffset);
-			}
-			else {
-				event = { type: "draw", begin: Date.now() - slideStart, end: null, curve: [{x: x, y: y}] };
-			}
-	}
-
-	function drawSegment( x, y, erase ) {
-		var ctx = drawingCanvas.context;
-		var scale = drawingCanvas.scale;
-		var xOffset = drawingCanvas.xOffset;
-		var yOffset = drawingCanvas.yOffset;
-		if ( !event ) {
-			// safeguard if broadcast hickup
-			startDrawing( x, y, erase );
-		}
-		event.curve.push({x: x, y: y});
-		if(y * scale + yOffset < drawingCanvas.height && x * scale + xOffset < drawingCanvas.width) {
-			if ( erase ) {
-				eraseWithSponge(ctx, x * scale + xOffset, y * scale + yOffset);
-			}
-			else {
-				drawWithPen(ctx, xLast, yLast, x * scale + xOffset, y * scale + yOffset);
-			}
-			xLast = x * scale + xOffset;
-			yLast = y * scale + yOffset;
-		}
-	}
-
-	function stopDrawing() {
-		if ( event ) {
-			event.end = Date.now() - slideStart;
-			if ( event.type == "erase" || event.curve.length > 1 ) {
-				// do not save a line with a single point only
-				recordEvent( event );
-			}
-			event = null;
-		}
-	}
 
 
 /*****************************************************************
-** User interface
+** Key User Drawing Event Handlers
 ******************************************************************/
 
+    let currentPath = null;
 
-// TODO: check all touchevents
+    // this function transforms current window coordinates to normalized coordinates
+    function normalize(x, y) {
+        return [(x - drawingCanvas.xOffset)/drawingCanvas.scale, (y - drawingCanvas.yOffset)/drawingCanvas.scale];
+    }
+    // this function transforms normalized coordinates to current window coordinates
+    function unnormalize(x, y) {
+        return [x*drawingCanvas.scale + drawingCanvas.xOffset, y*drawingCanvas.scale + drawingCanvas.yOffset];
+    }
+
+    function startPath( x, y, erase ) {
+        // start a new path
+        currentPath = { type: (erase) ? "erase" : "draw", begin: Date.now() - slideStart, end: null, curve: [{x: x, y: y}]};
+
+        // draw the path on canvas
+        var ctx = drawingCanvas.context;
+        [x, y] = unnormalize(x, y);
+        if ( erase ) eraseWithSponge(ctx, x, y);
+        else startPathWithPen(ctx, x, y);
+    }
+
+    function extendPath( x, y, erase ) {
+        if ( !currentPath ) {
+            // safeguard if broadcast hickup
+            startPath( x, y, erase );
+        }
+        currentPath.curve.push({x: x, y: y});
+
+        // extend the path on canvas
+        var ctx = drawingCanvas.context;
+        [x, y] = unnormalize(x, y);
+        if (y < drawingCanvas.height && x < drawingCanvas.width) {
+            if ( erase ) eraseWithSponge(ctx, x, y);
+            else drawPathWithPen(ctx, x, y);
+        }
+    }
+
+    function endPath() {
+        if ( currentPath ) {
+            currentPath.end = Date.now() - slideStart;
+            if ( currentPath.type == "erase" || currentPath.curve.length > 1 ) {
+                // do not save a line with a single point only
+                recordEvent( currentPath );
+            }
+            currentPath = null;
+        }
+    }
+
+    function handleStartPathEvent(evt, x, y) {
+		if ( readOnly || !evt.target.hasAttribute('data-chalkboard') ) return;
+
+        // prevent default action
+        evt.preventDefault();
+
+        // if there is any existing path, end it first
+        if (currentPath) handleEndPathEvent();
+
+        // start a new path
+        [x, y] = normalize(x, y);
+        startPath(x, y, eraseMode);
+
+        // broadcast
+        var message = new CustomEvent('send');
+        message.content = { sender: 'chalkboard-plugin', type: 'startPath', x: x, y: y, erase: eraseMode };
+        document.dispatchEvent( message );
+    }
+
+    function handleExtendPathEvent(evt, x, y, erase) {
+		if ( readOnly || !evt.target.hasAttribute('data-chalkboard') ) return;
+
+        // prevent default action
+        evt.preventDefault();
+
+        if ( !currentPath )  return;
+        
+        [x, y] = normalize(x, y);
+        extendPath(x, y, eraseMode );
+
+        // broadcast
+        var message = new CustomEvent('send');
+        message.content = { sender: 'chalkboard-plugin', type: 'extendPath', x: x, y: y, erase: eraseMode };
+        document.dispatchEvent( message );
+    }
+
+    function handleEndPathEvent(evt) {
+		if ( readOnly || !evt.target.hasAttribute('data-chalkboard') ) return;
+
+        // prevent default action
+        evt.preventDefault();
+
+        if (!currentPath)  return;
+
+        // end current path
+        endPath();
+
+        // broadcast the event
+        var message = new CustomEvent('send');
+        message.content = { sender: 'chalkboard-plugin', type: 'endPath' };
+        document.dispatchEvent( message );
+    }
+
+
 	document.addEventListener('touchstart', function(evt) {
-		if ( !readOnly && evt.target.hasAttribute('data-chalkboard') ) {
-			var scale = drawingCanvas.scale;
-			var xOffset = drawingCanvas.xOffset;
-			var yOffset = drawingCanvas.yOffset;
-
-			evt.preventDefault();
-		        var touch = evt.touches[0];
-		        mouseX = touch.pageX;
-		        mouseY = touch.pageY;
-			startDrawing( (mouseX - xOffset)/scale, (mouseY-yOffset)/scale, eraseMode );
-			// broadcast
-			var message = new CustomEvent('send');
-			message.content = { sender: 'chalkboard-plugin', type: 'startDrawing', x: (mouseX - xOffset)/scale, y: (mouseY-yOffset)/scale, erase: eraseMode };
-			document.dispatchEvent( message );
-		}
+        handleStartPathEvent(evt, evt.touches[0].pageX, evt.touches[0].pageY);
 	}, passiveSupported ? {passive: false} : false);
 
-	document.addEventListener('touchmove', function(evt) {
-//console.log("Touch move");
-		if ( event ) {
-			var scale = drawingCanvas.scale;
-			var xOffset = drawingCanvas.xOffset;
-			var yOffset = drawingCanvas.yOffset;
-
-		        var touch = evt.touches[0];
-        		mouseX = touch.pageX;
-        		mouseY = touch.pageY;
-        		if (mouseY < drawingCanvas.height && mouseX < drawingCanvas.width) {
-        		    	evt.preventDefault();
-				// move sponge
-				if ( event.type == "erase" ) {
-					drawingCanvas.sponge.style.left = (mouseX - eraser.radius) +"px" ;
-					drawingCanvas.sponge.style.top = (mouseY - eraser.radius) +"px" ;
-				}
-			}
-
-			drawSegment( (mouseX - xOffset)/scale, (mouseY-yOffset)/scale, eraseMode );
-			// broadcast
-			var message = new CustomEvent('send');
-			message.content = { sender: 'chalkboard-plugin', type: 'drawSegment', x: (mouseX - xOffset)/scale, y: (mouseY-yOffset)/scale, erase: eraseMode };
-			document.dispatchEvent( message );
-		}
-	}, false);
-
+	document.addEventListener( 'mousedown', function( evt ) {
+        handleStartPathEvent(evt, evt.pageX, evt.pageY);
+	});
 
 	document.addEventListener('touchend', function(evt) {
-		// hide sponge image
-		drawingCanvas.sponge.style.visibility = "hidden";
-		stopDrawing();
-		// broadcast
-		var message = new CustomEvent('send');
-		message.content = { sender: 'chalkboard-plugin', type: 'stopDrawing' };
-		document.dispatchEvent( message );
+        handleEndPathEvent(evt);
 	}, false);
 
-	document.addEventListener( 'mousedown', function( evt ) {
-		if ( !readOnly && evt.target.hasAttribute('data-chalkboard') ) {
-			var scale = drawingCanvas.scale;
-			var xOffset = drawingCanvas.xOffset;
-			var yOffset = drawingCanvas.yOffset;
-
-			mouseX = evt.pageX;
-			mouseY = evt.pageY;
-			startDrawing( (mouseX - xOffset)/scale, (mouseY-yOffset)/scale, eraseMode );
-			// broadcast
-			var message = new CustomEvent('send');
-			message.content = { sender: 'chalkboard-plugin', type: 'startDrawing', x: (mouseX - xOffset)/scale, y: (mouseY-yOffset)/scale, erase: eraseMode };
-			document.dispatchEvent( message );
-		}
+	document.addEventListener( 'mouseup', function( evt ) {
+        handleEndPathEvent(evt);
 	} );
+
+	document.addEventListener('touchmove', function(evt) {
+        handleExtendPathEvent(evt, evt.touches[0].pageX, evt.touches[0].pageY);
+	}, false);
 
 	document.addEventListener( 'mousemove', function( evt ) {
-//console.log("Mouse move");
-		if ( event ) {
-			var scale = drawingCanvas.scale;
-			var xOffset = drawingCanvas.xOffset;
-			var yOffset = drawingCanvas.yOffset;
-
-			mouseX = evt.pageX;
-			mouseY = evt.pageY;
-			drawSegment( (mouseX - xOffset)/scale, (mouseY-yOffset)/scale, eraseMode );
-			// broadcast
-			var message = new CustomEvent('send');
-			message.content = { sender: 'chalkboard-plugin', type: 'drawSegment', x: (mouseX - xOffset)/scale, y: (mouseY-yOffset)/scale, erase: eraseMode };
-			document.dispatchEvent( message );
-		}
+        handleExtendPathEvent(evt, evt.pageX, evt.pageY);
 	} );
-
-
-	document.addEventListener( 'mouseup', function( evt ) {
-		if ( event ) {
-			stopDrawing();
-			// broadcast
-			var message = new CustomEvent('send');
-			message.content = { sender: 'chalkboard-plugin', type: 'stopDrawing' };
-			document.dispatchEvent( message );
-		}
-	} );
-
 
 	window.addEventListener( "resize", function() {
-//console.log("resize");
-		// Resize the canvas and draw everything again
-		var timestamp = getSlideDuration();
-
         drawingCanvas.width  = window.innerWidth;
         drawingCanvas.height = window.innerHeight;
         drawingCanvas.canvas.width  = drawingCanvas.width;
@@ -729,8 +643,7 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
         drawingCanvas.xOffset = (drawingCanvas.width - storage.width * drawingCanvas.scale)/2;
         drawingCanvas.yOffset = (drawingCanvas.height - storage.height * drawingCanvas.scale)/2;
 
-        startPlayback( timestamp );
-
+        startPlayback();
 	} );
 
 	deck.addEventListener( 'ready', function( evt ) {
@@ -738,9 +651,8 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		if ( !printMode ) {
 			slideStart = Date.now();
 			slideIndices = deck.getIndices();
-            startPlayback( getSlideDuration() );
-		}
-		else {
+            startPlayback();
+		} else {
 			whenReady( createPrintout );
 		}
 	});
@@ -749,7 +661,7 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 			slideStart = Date.now();
 			slideIndices = deck.getIndices();
 			clearCanvas();
-            startPlayback( getSlideDuration() );
+            startPlayback();
 		}
 	});
 	deck.addEventListener( 'fragmentshown', function( evt ) {
@@ -757,7 +669,7 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 			slideStart = Date.now();
 			slideIndices = deck.getIndices();
 			clearCanvas();
-            startPlayback( getSlideDuration(), 0 );
+            startPlayback();
 		}
 	});
 	deck.addEventListener( 'fragmenthidden', function( evt ) {
@@ -765,46 +677,49 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 			slideStart = Date.now();
 			slideIndices = deck.getIndices();
 			clearCanvas();
-            startPlayback( getSlideDuration() );
+            startPlayback();
 		}
 	});
 
     function closeNotesCanvas() {
-        unsetEraseMode();
         if ( notescanvas.style.pointerEvents !== "none" ) {
-            let button = document.getElementById("toggle-notes");
-            event = null;
+            // if there is any unrecorded path, end and record it first
+            if (currentPath) endPath();
+
+            // disable canvas
             notescanvas.style.pointerEvents = "none";
-            button.style.opacity = "0.3";
         }
+
+        // lighten notes button
+        let button = document.getElementById("toggle-notes");
+        button.style.opacity = "0.3";
+
+        // hide erase button
+        unsetEraseMode();
         eraserButton.style.visibility = 'hidden';
     }
 
     function openNotesCanvas() {
-        unsetEraseMode();
+        // highlight edit button
         setColor(0);
         let button = document.getElementById("toggle-notes");
         button.style.opacity = "1";
-        recordEvent( { type:"setcolor", index: 0, begin: Date.now() - slideStart } );
-        if (color) {
-            let idx = color;
-            setColor(idx);
-            recordEvent( { type:"setcolor", index: idx, begin: Date.now() - slideStart } );
-        } else {
-            color = 0;
-        }
+
+        // enable notes canvas
         notescanvas.style.pointerEvents = "auto";
+
+        // show erase button
+        unsetEraseMode();
         eraserButton.style.visibility = 'visible';
         eraserButton.style.opacity = 0.3;
     }
 
 	function toggleNotesCanvas() {
         if ( !readOnly ) {
-            if ( notescanvas.style.pointerEvents != "none" ) {
-                closeNotesCanvas();
-            }
-            else {
+            if ( notescanvas.style.pointerEvents === "none" ) {
                 openNotesCanvas();
+            } else {
+                closeNotesCanvas();
             }
 		}
 	}
@@ -844,7 +759,7 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
         resetSlide(force);
         // broadcast
         var message = new CustomEvent('send');
-        message.content = { sender: 'chalkboard-plugin', type: 'resetSlide' };
+        message.content = { sender: 'chalkboard-plugin', type: 'reset' };
         document.dispatchEvent( message );
     }
 
@@ -852,7 +767,6 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		var ok = force || confirm("Please confirm to delete chalkboard drawings on this slide!");
 		if ( ok ) {
 //console.log("resetSlide ");
-			stopPlayback();
 			slideStart = Date.now();
 			event = null;
 
@@ -867,7 +781,6 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 	function resetStorage( force ) {
 		var ok = force || confirm("Please confirm to delete all chalkboard drawings!");
 		if ( ok ) {
-			stopPlayback();
 			slideStart = Date.now();
 			clearCanvas();
 			storage = { width: drawingCanvas.width - 2 * drawingCanvas.xOffset, height: drawingCanvas.height - 2 * drawingCanvas.yOffset, data: []};
@@ -879,7 +792,6 @@ var RevealHandWrite = window.RevealHandWrite || { id: 'handwrite', init: (reveal
 		}
 	}
 
-    
 	RevealHandWrite.toggleNotesCanvas = toggleNotesCanvas;
 	RevealHandWrite.toggleEraseMode = toggleEraseMode;
 	RevealHandWrite.clear = clear;
